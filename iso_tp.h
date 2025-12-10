@@ -36,16 +36,16 @@
 /******************************************************************************
  * ISO-TP DEFINITIONS
  *****************************************************************************/
-#define ISO_TP_MAX_FRAME_SIZE 8u /**< Max frame size (classic CAN2.0 atm) */
+#define ISO_TP_MAX_CAN_DL 8u /**< Maximum CAN dlc allowed */
 
 /******************************************************************************
  * ISO-TP COMMON
  *****************************************************************************/
-/** CAN2.0 simplified frame structure. */
+/** CAN2.0 (or FD) simplified frame structure. */
 struct iso_tp_can_frame {
 	uint32_t id;	  /**< Frame identifier. */
-	uint8_t  len;	  /**< Data length code (0-8). */
-	uint8_t  data[ISO_TP_MAX_FRAME_SIZE]; /**< Frame data payload. */
+	uint8_t  len;	  /**< Data length code (0-8) (0-64 for canfd). */
+	uint8_t  data[ISO_TP_MAX_CAN_DL]; /**< Frame data payload. */
 };
 
 /******************************************************************************
@@ -64,8 +64,9 @@ enum _iso_tp_n_pdu_type {
 
 /** Events emited by ISO-TP state machine */
 enum iso_tp_event {
-	ISO_TP_EVENT_NONE, /**< No event, proceed. */
-	ISO_TP_EVENT_PLEASE_CONFIGURE /**< User must call iso_tp_set_config */
+	ISO_TP_EVENT_NONE, /**< No event, proceed */
+	ISO_TP_EVENT_INVALID_CONFIG, /**< Providen config is invalid */
+	ISO_TP_EVENT_N_PDU /**< N_PDU detected */
 };
 
 /** Internal FSM state */
@@ -99,6 +100,14 @@ struct iso_tp_config {
 
 	uint32_t src; /**< Configure source      endpoint address */
 	uint32_t dst; /**< Configure destination endpoint address */
+
+	uint8_t tx_dl; /**< Max DLC for TX limited by ISO_TP_MAX_CAN_DL. */
+	uint8_t rx_dl; /**< Max DLC for TX limited by ISO_TP_MAX_CAN_DL.
+			Will be deduced automatically,
+			so no configuration needed. */
+
+	uint8_t min_ff_dl; /**< Min DLC for FF frame.
+			    Does not require configuration */
 };
 
 /** N_PCI (Network Protocol Control Information).
@@ -119,9 +128,9 @@ struct _iso_tp_n_pci
 /** N_PDU (Network Protocol Data Unit) */
 struct _iso_tp_n_pdu
 {
-	enum _iso_tp_n_pdu_type type;   /**< N_PDU type or NAME */
-	struct _iso_tp_n_pci	n_pci;  /**< N_PCI info */
-	uint8_t			n_data[ISO_TP_MAX_FRAME_SIZE]; /**< Payload */
+	uint8_t			type;  /**< N_PDU type or NAME */
+	struct _iso_tp_n_pci	n_pci; /**< N_PCI info */
+	uint8_t			n_data[ISO_TP_MAX_CAN_DL]; /**< Payload */
 
 	/* bool extdlc; */ /**< Tells if N_PDU dlc is extended
 				@note Not standard */
@@ -149,9 +158,12 @@ void iso_tp_init(struct iso_tp *self, uint8_t *buf, size_t len)
 {
 	self->_state = _ISO_TP_STATE_CONFIG;
 
-	self->_cfg.mode = ISO_TP_MODE_INVALID;
-	self->_cfg.src  = 0x00u;
-	self->_cfg.dst  = 0x00u;
+	self->_cfg.mode  = ISO_TP_MODE_INVALID;
+	self->_cfg.src   = 0x00u;
+	self->_cfg.dst   = 0x00u;
+	self->_cfg.tx_dl = 8u; /** Assume CAN2.0 by default */
+	self->_cfg.rx_dl = 8u; /** Assume CAN2.0 by default */
+	self->_cfg.min_ff_dl = 8u;
 
 	self->_has_tx = false;
 	self->_has_rx = false;
@@ -206,7 +218,8 @@ bool iso_tp_pop_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
 }
 
 
-/** Deduce variation of _ISO_TP_N_PDU_TYPE_SF */
+/** Deduce variation of _ISO_TP_N_PDU_TYPE_SF
+ *  Currently only Normal addressing is used TODO */
 void _iso_tp_deduce_n_pdu_type_sf(struct iso_tp *self,
 				  struct _iso_tp_n_pdu *n_pdu,
 				  struct iso_tp_can_frame *f)
@@ -215,9 +228,10 @@ void _iso_tp_deduce_n_pdu_type_sf(struct iso_tp *self,
 
 	(void)self;
 
-	/* Extended frame */
+	/* Invalid(0u) DLC means extended frame */
 	if (dlc == 0u) {
-		/* Extended frame NOT YET supported */
+		/* Extended frame NOT YET supported
+		 * (Do not confuse with extended addressing) */
 	} else if (f->len < (dlc + 1u)) {
 		/* CAN frame DLC should not be shorter than N_PDU */
 	} else if (dlc <= 7u) {
@@ -228,29 +242,33 @@ void _iso_tp_deduce_n_pdu_type_sf(struct iso_tp *self,
 	} else {}
 }
 
+/** Deduce variation of _ISO_TP_N_PDU_TYPE_FF
+ *  Currently only Normal addressing is used TODO */
 void _iso_tp_deduce_n_pdu_type_ff(struct iso_tp *self,
 				  struct _iso_tp_n_pdu *n_pdu,
 				  struct iso_tp_can_frame *f)
 {
 	uint32_t dlc = ((f->data[0] & 0x0Fu) << 8u) | f->data[1];
 
-	(void)self;
+	uint8_t ff_dl = 0u;
 
-	/* Extended frame */
+	/* Setup rx_dl based on received CAN DL */
+	/* TODO See: Table 7 — Received CAN_DL to RX_DL mapping table */
+	self->_cfg.rx_dl = f->len;
+
+	/* Calculate FF_DL based on RX_DL and FF_DL(min) */
+	ff_dl = (self->_cfg.rx_dl > self->_cfg.min_ff_dl) ?
+			self->_cfg.rx_dl : self->_cfg.min_ff_dl;
+
+	/* Invalid(0u) DLC means extended frame */
 	if (dlc == 0u) {
-		/* Extended frame NOT YET supported */
-	} else if ((dlc < 6u) || (f->len < 8u)) {
-		/* We have no reason to assume FirstFrame (FF) is
-		 * less than physical frame size @note may be not standard. */
-
-		 /* TODO we should not assume classical CAN, as well as
-		  * magic numbers, make a variable self->mtu to
-		  * indicate max physical frame size used. */
-	} else if (dlc <= 7u) {
+		/* Extended frame NOT YET supported
+		 * (Do not confuse with extended addressing) */
+	} else if (dlc >= ff_dl) {
 		n_pdu->type = _ISO_TP_N_PDU_TYPE_FF;
 
 		/* Copy data to N_PDU */
-		(void)memcpy(n_pdu->n_data, &f->data[2], 6u);
+		(void)memcpy(n_pdu->n_data, &f->data[2], ff_dl - 2u);
 	} else {}
 }
 
@@ -300,10 +318,21 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 	(void)delta_time_ms;
 	switch (self->_state) {
 	case _ISO_TP_STATE_CONFIG:
-		if (self->_cfg.mode == (uint8_t)ISO_TP_MODE_INVALID) {
-			ev = ISO_TP_EVENT_PLEASE_CONFIGURE;
+		/* Mode and MTU must be set correctly */
+		if ((self->_cfg.mode == (uint8_t)ISO_TP_MODE_INVALID) ||
+		    (self->_cfg.tx_dl < 8u)) {
+			ev = ISO_TP_EVENT_INVALID_CONFIG;
 			break;
 		}
+
+		/* Min DLC min_ff_dl (see Table 14)
+		 * TODO addressing types
+		 * Only normal addressing mode is supported yet */
+		if (self->_cfg.tx_dl == 8u) {
+			self->_cfg.min_ff_dl = 8u;
+		} else if (self->_cfg.tx_dl > 8u) {
+			self->_cfg.min_ff_dl = self->_cfg.tx_dl - 1u;
+		} else {}
 
 		/* @@ PREPARE TRANSITION TO THE NEXT STATE @@ */
 		self->_state = _ISO_TP_STATE_LISTEN_N_PDU;
@@ -328,6 +357,10 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 		}
 
 		_iso_tp_deduce_n_pdu(self, &n_pdu, &self->_rx_frame);
+
+		if (n_pdu.type != (uint8_t)_ISO_TP_N_PDU_TYPE_UNKNOWN) {
+			ev = ISO_TP_EVENT_N_PDU;
+		}
 
 		break;
 	}
