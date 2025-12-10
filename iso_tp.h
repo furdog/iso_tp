@@ -31,6 +31,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h> /* for memcpy */
 
 /******************************************************************************
  * ISO-TP DEFINITIONS
@@ -54,6 +55,7 @@ struct iso_tp_can_frame {
  * In simple terms it just identifies ISO-TP message type. */
 enum _iso_tp_n_pdu_type {
 	_ISO_TP_N_PDU_TYPE_UNKNOWN, /**< N_PDU is not known */
+	_ISO_TP_N_PDU_TYPE_INVALID, /**< N_PDU is not valid */
 	_ISO_TP_N_PDU_TYPE_SF, /**< N_PDU SingleFrame      (SF) */
 	_ISO_TP_N_PDU_TYPE_FF, /**< N_PDU FirstFrame       (FF) */
 	_ISO_TP_N_PDU_TYPE_CF, /**< N_PDU ConsecutiveFrame (CF) */
@@ -120,6 +122,9 @@ struct _iso_tp_n_pdu
 	enum _iso_tp_n_pdu_type type;   /**< N_PDU type or NAME */
 	struct _iso_tp_n_pci	n_pci;  /**< N_PCI info */
 	uint8_t			n_data[ISO_TP_MAX_FRAME_SIZE]; /**< Payload */
+
+	/* bool extdlc; */ /**< Tells if N_PDU dlc is extended
+				@note Not standard */
 };
 
 /** Main instance */
@@ -172,7 +177,7 @@ bool iso_tp_push_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
 {
 	bool result = false;
 
-	if ((self->_state == (uint8_t)_ISO_TP_STATE_LISTEN) &&
+	if ((self->_state == (uint8_t)_ISO_TP_STATE_LISTEN_N_PDU) &&
 	    !self->_has_rx) {
 		self->_has_rx = true;
 
@@ -202,66 +207,85 @@ bool iso_tp_pop_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
 
 
 /** Deduce variation of _ISO_TP_N_PDU_TYPE_SF */
-enum _iso_tp_n_pdu_type _iso_tp_deduce_n_pdu_type_sf(struct iso_tp *self,
-						struct iso_tp_can_frame *f)
+void _iso_tp_deduce_n_pdu_type_sf(struct iso_tp *self,
+				  struct _iso_tp_n_pdu *n_pdu,
+				  struct iso_tp_can_frame *f)
 {
-	enum _iso_tp_n_pdu_type type = _ISO_TP_N_PDU_TYPE_UNKNOWN;
+	uint8_t dlc = (f->data[0] & 0x0Fu);
 
-	uint8_t dlc = (f.data[0] & 0x0F);
+	(void)self;
 
-	/* Extended SF frame */
-	if (dlc == 0) {
-		/* Not supported */
-	} else if ((dlc <= 6u) && (f->len >= dlc)) {
-		type == _ISO_TP_N_PDU_TYPE_SF;
-	} else {
-		/* >6 byte long frames not yet supported */
-	}
+	/* Extended frame */
+	if (dlc == 0u) {
+		/* Extended frame NOT YET supported */
+	} else if (f->len < (dlc + 1u)) {
+		/* CAN frame DLC should not be shorter than N_PDU */
+	} else if (dlc <= 7u) {
+		n_pdu->type = _ISO_TP_N_PDU_TYPE_SF;
 
-	return type;
+		/* Copy data to N_PDU */
+		(void)memcpy(n_pdu->n_data, &f->data[1], dlc);
+	} else {}
+}
+
+void _iso_tp_deduce_n_pdu_type_ff(struct iso_tp *self,
+				  struct _iso_tp_n_pdu *n_pdu,
+				  struct iso_tp_can_frame *f)
+{
+	uint32_t dlc = ((f->data[0] & 0x0Fu) << 8u) | f->data[1];
+
+	(void)self;
+
+	/* Extended frame */
+	if (dlc == 0u) {
+		/* Extended frame NOT YET supported */
+	} else if ((dlc < 6u) || (f->len < 8u)) {
+		/* We have no reason to assume FirstFrame (FF) is
+		 * less than physical frame size @note may be not standard. */
+
+		 /* TODO we should not assume classical CAN, as well as
+		  * magic numbers, make a variable self->mtu to
+		  * indicate max physical frame size used. */
+	} else if (dlc <= 7u) {
+		n_pdu->type = _ISO_TP_N_PDU_TYPE_FF;
+
+		/* Copy data to N_PDU */
+		(void)memcpy(n_pdu->n_data, &f->data[2], 6u);
+	} else {}
 }
 
 /** Deduce N_PDU based on frame contents.
- *  TODO return more detailed information about PDU,
- *  probably return N_PCI struct */
-enum _iso_tp_n_pdu_type _iso_tp_deduce_n_pdu_type_and_store_n_pci(
-						struct iso_tp *self,
-						struct iso_tp_can_frame *f
-						struct iso_tp_n_pci *n_pci)
+ * Based on: ISO 15765-2:2016(E) Table 9 — Summary of N_PCI bytes */
+void _iso_tp_deduce_n_pdu(struct iso_tp *self, struct _iso_tp_n_pdu *n_pdu,
+			  struct iso_tp_can_frame *f)
 {
-	enum _iso_tp_n_pdu_type type = _ISO_TP_N_PDU_TYPE_UNKNOWN;
+	n_pdu->type = _ISO_TP_N_PDU_TYPE_INVALID;
 
-	if (f->len >= 1u) {
-		/* Variant of _ISO_TP_N_PDU_TYPE_SF */
-		if ((f.data[0] & 0xF0) == 0x00u) {
-			_iso_tp_deduce_n_pdu_type_sf(self, f);
-		}
+	/* _ISO_TP_N_PDU_TYPE_SF */
+	if ((f->len >= 1u) && ((f->data[0] & 0xF0u) == 0x00u)) {
+		_iso_tp_deduce_n_pdu_type_sf(self, n_pdu, f);
 
-		&&
-	    ((f.data[0] & 0xF0) == 0x00u) &&
-	    ((f.data[0] & 0x0F) >  0u) {
-		uint8_t dlc = (f.data[0] & 0x0F);
-		if ((dlc <= 6u) && (f->len >= dlc)) {
-			/* >6 byte long frames not supported
-			 * in this mode, yet */
-			type == _ISO_TP_N_PDU_TYPE_SF;
-		}
-	} else if ( (self->f.len >= 1u) &&
-	    ((f.data[0] & 0xF0) == 0x00u) &&
-	    ((f.data[0] & 0x0F) == 0u) {
-		/* >8 byte long frames not supported yet */
-	} else if (f->len > 2u) &&
-	    ((f.data[0] & 0xF0) == 0x10u) &&
-	    ((f.data[0] & 0x0F) >  0u) {
+	/* _ISO_TP_N_PDU_TYPE_CF */ 
+	} else if ((f->len >= 1u) && ((f->data[0] & 0xF0u) == 0x20u)) {
+		/* It's a consecutive frame! */
+		n_pdu->type = _ISO_TP_N_PDU_TYPE_CF;
+		n_pdu->n_pci.sn = (f->data[0] & 0x0Fu);
+
+		/* Copy data to N_PDU */
+		(void)memcpy(n_pdu->n_data, &f->data[1], f->len - 1u);
+
+	/* _ISO_TP_N_PDU_TYPE_FF */ 
+	} else if ((f->len >= 2u) && ((f->data[0] & 0xF0u) == 0x10u)) {
+		_iso_tp_deduce_n_pdu_type_ff(self, n_pdu, f);
+
+	/* _ISO_TP_N_PDU_TYPE_FC */
+	} else if ((f->len >= 3u) && ((f->data[0] & 0xF0u) == 0x30u)) {
+		/* Simplest case, we don't assume a shit */
+		n_pdu->type = _ISO_TP_N_PDU_TYPE_FC;
+		n_pdu->n_pci.fs     = (f->data[0] & 0x0Fu);
+		n_pdu->n_pci.bs     = f->data[1];
+		n_pdu->n_pci.min_st = f->data[2];
 	} else {}
-
-	return type;
-}
-
-/** Begin state transition based on current N_PDU */
-void _iso_tp_switch_state_based_on_n_pdu_type(struct iso_tp *self,
-					      enum _iso_tp_n_pdu_type type)
-{
 }
 
 /** Main instance state machine. Works step by step. Returns events during
@@ -276,18 +300,18 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 	(void)delta_time_ms;
 	switch (self->_state) {
 	case _ISO_TP_STATE_CONFIG:
-		if (self->_cfg.mode == ISO_TP_MODE_INVALID) {
+		if (self->_cfg.mode == (uint8_t)ISO_TP_MODE_INVALID) {
 			ev = ISO_TP_EVENT_PLEASE_CONFIGURE;
 			break;
 		}
 
 		/* @@ PREPARE TRANSITION TO THE NEXT STATE @@ */
-		self->_state = _ISO_TP_STATE_LISTEN;
+		self->_state = _ISO_TP_STATE_LISTEN_N_PDU;
 
 		break;
 
 	case _ISO_TP_STATE_LISTEN_N_PDU: {
-		enum _iso_tp_n_pdu_type n_pdu_type;
+		struct _iso_tp_n_pdu n_pdu;
 
 		if (!self->_has_rx) {
 			break;
@@ -303,13 +327,14 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 			break;
 		}
 
-		n_pdu_type = _iso_tp_deduce_n_pdu(self, &self->_rx_frame);
-
-		if (_iso_tp_switch_state_based_on_n_pdu_type(self, n_pdu_type))
-		{
-		};
+		_iso_tp_deduce_n_pdu(self, &n_pdu, &self->_rx_frame);
 
 		break;
+	}
+
+	default:
+		break;
+
 	}
 
 	return ev;
