@@ -3,7 +3,7 @@
  * @brief ISO-TP State machine implementation (Hardware-Agnostic)
  *
  * This file contains the software implementation of the ISO-TP logic.
- * The design is hardware-agnostic, requiring an external adaptation layer 
+ * The design is hardware-agnostic, requiring an external adaptation layer
  * for hardware interaction.
  *
  * **Reference Specification:**
@@ -15,24 +15,24 @@
  * be found as is, for example N_PCItype in code is *_N_PCITYPE.
  * Name casing will be changed according to local coding conventions.
  * Names with spaces will be prefixed with underscore `_`
- * 
+ *
  * **Conventions:**
  * C89, Linux kernel style, MISRA, rule of 10, No hardware specific code,
  * only generic C and some binding layer. Be extra specific about types.
- * 
+ *
  * Scientific units where posible at end of the names, for example:
  * - timer_10s (timer_10s has a resolution of 10s per bit)
  * - power_150w (power 150W per bit or 0.15kw per bit)
  *
  * Keep variables without units if they're unknown or not specified or hard
  * to define with short notation.
- * 
+ *
  * ```LICENSE
  * Copyright (c) 2025 furdog <https://github.com/furdog>
  *
  * SPDX-License-Identifier: 0BSD
  * ```
- * 
+ *
  * Be free, be wise and take care of yourself!
  * With best wishes and respect, furdog
  */
@@ -113,8 +113,6 @@ struct iso_tp_n_pci
 
 	/* FirstFrame (FF) */
 	uint32_t ff_dl; /**< FirstFrame  DataLength (FF_DL). */
-	uint8_t  min_ff_dl; /**< Minimum value of FF_DL based on the
-				 addressing scheme */
 
 	/* ConsecutiveFrame (CF) */
 	uint8_t sn; /**< SequenceNumber */
@@ -131,11 +129,12 @@ struct iso_tp_n_pdu
 	struct iso_tp_n_pci n_pci; /**< N_PCI info */
 
 	uint8_t	n_data[ISO_TP_MAX_CAN_DL]; /**< Payload */
+	uint8_t	len_n_data; /**< n_data length @note Not standard */
 };
 
 /******************************************************************************
  * ISO-TP TYPE AND DATA DEFINITIONS AND IMPLEMENTATION
- * 
+ *
  * Please note that most of the data structures, functions,
  * and common expressions in this section are not explicitly mentioned
  * in the standard and are solely part of the author's design.
@@ -188,6 +187,9 @@ struct iso_tp_config {
 	uint8_t rx_dl; /**< Max DLC for TX limited by ISO_TP_MAX_CAN_DL.
 			Will be deduced automatically,
 			so no configuration needed. */
+
+	uint8_t min_ff_dl; /**< Minimum value of FF_DL based on the
+				addressing scheme */
 };
 
 /** Main instance @note Not standard */
@@ -219,6 +221,7 @@ void iso_tp_init(struct iso_tp *self)
 	self->_cfg.dst       = 0x00u;
 	self->_cfg.tx_dl     = 8u; /* Assume CAN2.0 by default */
 	self->_cfg.rx_dl     = 8u; /* Assume CAN2.0 by default */
+	self->_cfg.min_ff_dl = 8u; /* Assume CAN2.0 by default */
 
 	self->_has_tx = false;
 	self->_has_rx = false;
@@ -269,7 +272,7 @@ bool iso_tp_pop_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
 	return result;
 }
 
-/** Deduce variation of ISO_TP_N_PCITYPE_SF
+/** Deduce variation of ISO_TP_N_PCITYPE_SF.
  *  Currently only Normal addressing is used TODO */
 void _iso_tp_deduce_n_pcitype_n_sf(struct iso_tp *self,
 				   struct iso_tp_can_frame *f)
@@ -302,7 +305,7 @@ void _iso_tp_deduce_n_pcitype_n_sf(struct iso_tp *self,
 	}
 }
 
-/** Deduce variation of ISO_TP_N_PCITYPE_FF
+/** Deduce variation of ISO_TP_N_PCITYPE_FF.
  *  Currently only Normal addressing is used TODO */
 void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 				   struct iso_tp_can_frame *f)
@@ -322,12 +325,15 @@ void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 
 	if (can_dl < 2u) {
 		/* CAN DLC can't be less than len(N_PCI) */
-	} else if (n_pci->sf_dl == 0u) {
+	} else if (n_pci->ff_dl == 0u) {
 		/* Extended frame NOT YET supported
 		 * (Do not confuse with extended addressing) */
-	} else if (n_pci->ff_dl >= n_pci->min_ff_dl) {
+	} else if (n_pci->ff_dl < self->_cfg.min_ff_dl) {
 		/* FF_DL can't be less than preconfigured min(FF_DL) */
+	} else if (n_pci->ff_dl < (self->_cfg.rx_dl - 2u)) {
+		/* FF_DL can't be less than RX_DL - len(N_PCI) */
 	} else {
+		/* Valid frame */
 		n_pci->n_pcitype = ISO_TP_N_PCITYPE_FF;
 
 		/* Copy data to N_PDU */
@@ -335,9 +341,10 @@ void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 	}
 }
 
-/** Deduce N_PCItype based on frame contents.
- * Based on: ISO 15765-2:2016(E) Table 9 — Summary of N_PCI bytes */
-void _iso_tp_deduce_n_pcitype(struct iso_tp *self, struct iso_tp_can_frame *f)
+/** Decode N_PDU and N_PCItype based on frame contents.
+ * Based on: ISO 15765-2:2016(E) Table 9 — Summary of N_PCI bytes.
+ * Currently only Normal addressing is used TODO */
+void _iso_tp_decode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 {
 	/* Commonly used */
 	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
@@ -351,11 +358,11 @@ void _iso_tp_deduce_n_pcitype(struct iso_tp *self, struct iso_tp_can_frame *f)
 	if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x00u)) {
 		_iso_tp_deduce_n_pcitype_n_sf(self, f);
 
-	/* ISO_TP_N_PCITYPE_FF */ 
+	/* ISO_TP_N_PCITYPE_FF */
 	} else if ((can_dl >= 2u) && ((can_data[0] & 0xF0u) == 0x10u)) {
 		_iso_tp_deduce_n_pcitype_n_ff(self, f);
 
-	/* ISO_TP_N_PCITYPE_CF */ 
+	/* ISO_TP_N_PCITYPE_CF */
 	} else if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x20u)) {
 		/* It's a consecutive frame! */
 		n_pci->n_pcitype = ISO_TP_N_PCITYPE_CF;
@@ -372,6 +379,85 @@ void _iso_tp_deduce_n_pcitype(struct iso_tp *self, struct iso_tp_can_frame *f)
 		n_pci->bs         = can_data[1];
 		n_pci->min_st     = can_data[2];
 	} else {}
+}
+
+/** Encode N_PDU and put its content into CAN frame.
+ * Caller must ensure n_pdu->n_data contains the payload for
+ * THIS specific frame. Currently only Normal addressing is used TODO */
+void _iso_tp_encode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
+{
+	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
+	struct iso_tp_n_pci *n_pci    = &self->_n_pdu.n_pci;
+	uint8_t             *can_data = f->data;
+	uint8_t		    *can_dl   = &f->len;
+
+	/* Cleanup frame */
+	(void)memset(can_data, 0u, 8u);
+
+	switch (n_pci->n_pcitype) {
+	case ISO_TP_N_PCITYPE_SF:
+		/* SF PCI: 0000 LLLL */
+		if (n_pci->sf_dl <= 7u) {
+			can_data[0] = (uint8_t)(0x00u | n_pci->sf_dl);
+
+			(void)memcpy(&can_data[1], n_pdu->n_data,
+				     n_pci->sf_dl);
+
+			*can_dl = 1u + n_pci->sf_dl;
+		}
+		break;
+
+	case ISO_TP_N_PCITYPE_FF:
+		/* FF PCI: 0001 LLLL LLLL LLLL */
+		/* Byte 0: 0x10 | Upper 4 bits of Length */
+		can_data[0] = (uint8_t)(0x10u | ((n_pci->ff_dl >> 8u) & 0x0Fu));
+
+		/* Byte 1: Lower 8 bits of Length */
+		can_data[1] = (uint8_t)(n_pci->ff_dl & 0xFFu);
+
+		/* Payload for FF starts at index 2.
+		   Standard CAN FF always has 6 bytes of payload (if full).
+		  (Assuming we are sending a full frame here) */
+		(void)memcpy(&can_data[2], n_pdu->n_data, 6u);
+
+		*can_dl = 8u; /* FF Always full frame from CAN 2.0 */
+		break;
+
+	case ISO_TP_N_PCITYPE_CF: {
+		uint8_t cf_payload_len = n_pci->sf_dl;
+
+		/* CF PCI: 0010 SSSS */
+		can_data[0] = (uint8_t)(0x20u | (n_pci->sn & 0x0Fu));
+
+		/* Safety cap */
+		if (cf_payload_len > 7u) {
+			cf_payload_len = 7u;
+		}
+
+		(void)memcpy(&can_data[1], n_pdu->n_data, cf_payload_len);
+
+		*can_dl = 1u + cf_payload_len;
+
+		break;
+	}
+
+	case ISO_TP_N_PCITYPE_FC:
+		/* FC PCI: 0011 FFFF */
+		can_data[0] = (uint8_t)(0x30u | (n_pci->fs & 0x0Fu));
+		can_data[1] = n_pci->bs;
+		can_data[2] = n_pci->min_st;
+
+		*can_dl = 3u; /* Minimum len FC */
+
+		/* Padding (optional): 8 bytes 0x00 or 0xAA */
+		/* f->len = 8u; */
+		break;
+
+	default:
+		/* Should not happen if logic is correct */
+		*can_dl = 0;
+		break;
+	}
 }
 
 /** Main instance state machine. Works step by step. Returns events during
@@ -400,9 +486,9 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 		 * TODO addressing types
 		 * Only normal addressing mode is supported yet */
 		if (self->_cfg.tx_dl == 8u) {
-			n_pci->min_ff_dl = 8u;
+			self->_cfg.min_ff_dl = 8u;
 		} else if (self->_cfg.tx_dl > 8u) {
-			n_pci->min_ff_dl = self->_cfg.tx_dl - 1u;
+			self->_cfg.min_ff_dl = self->_cfg.tx_dl - 1u;
 		} else {}
 
 		/* @@ PREPARE TRANSITION TO THE NEXT STATE @@ */
@@ -425,9 +511,9 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 			break;
 		}
 
-		_iso_tp_deduce_n_pcitype(self, &self->_can_rx_frame);
+		_iso_tp_decode_n_pdu(self, &self->_can_rx_frame);
 
-		if (n_pci->n_pcitype == (uint8_t)ISO_TP_N_PCITYPE_UNKNOWN) {
+		if (n_pci->n_pcitype == (uint8_t)ISO_TP_N_PCITYPE_INVALID) {
 			/* Ignore frame */
 			break;
 		}
