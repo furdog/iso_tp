@@ -179,6 +179,9 @@ struct iso_tp {
 
 	struct iso_tp_can_frame _can_tx_frame; /**< Frame to transmit */
 	struct iso_tp_can_frame _can_rx_frame; /**< Received frame */
+
+	uint8_t cf_left; /**< Data left to read for consecutive frame
+			      @note Not standard */
 };
 
 /** Init main instance */
@@ -196,50 +199,10 @@ void iso_tp_init(struct iso_tp *self)
 	self->_has_tx = false;
 	self->_has_rx = false;
 
+	self->cf_left = 0u;
+
 	/*self->_src_sv_frame = ??;*/
 	/*self->_dst_sv_frame = ??;*/
-}
-
-/** Configures main instance. Call this method after init. */
-void iso_tp_set_config(struct iso_tp *self, struct iso_tp_config *cfg)
-{
-	/* Only set config in this specific state */
-	if (self->_state == (uint8_t)_ISO_TP_STATE_CONFIG) {
-		self->_cfg = *cfg;
-	}
-}
-
-/** Push RX CAN frame for processing, returns false if busy. */
-bool iso_tp_push_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
-{
-	bool result = false;
-
-	if ((self->_state == (uint8_t)_ISO_TP_STATE_LISTEN_N_PDU) &&
-	    !self->_has_rx) {
-		self->_has_rx = true;
-
-		self->_can_rx_frame = *f;
-
-		result = true;
-	}
-
-	return result;
-}
-
-/** Pop TX CAN frame, returns false if busy. */
-bool iso_tp_pop_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
-{
-	bool result = false;
-
-	if (self->_has_tx) {
-		self->_has_tx = false;
-
-		*f = self->_can_tx_frame;
-
-		result = true;
-	}
-
-	return result;
 }
 
 /** Deduce variation of ISO_TP_N_PCITYPE_SF.
@@ -270,8 +233,10 @@ void _iso_tp_deduce_n_pcitype_n_sf(struct iso_tp *self,
 		/* Valid frame */
 		n_pci->n_pcitype = ISO_TP_N_PCITYPE_SF;
 
+		n_pdu->len_n_data = n_pci->sf_dl;
+
 		/* Copy data to N_PDU */
-		(void)memcpy(n_pdu->n_data, &can_data[1], n_pci->sf_dl);
+		(void)memcpy(n_pdu->n_data, &can_data[1], n_pdu->len_n_data);
 	}
 }
 
@@ -306,8 +271,13 @@ void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 		/* Valid frame */
 		n_pci->n_pcitype = ISO_TP_N_PCITYPE_FF;
 
+		n_pdu->len_n_data = can_dl - 2u;
+
+		/* Set cf_left to know how many bytes left for CF to read */
+		self->cf_left = n_pci->ff_dl - n_pdu->len_n_data;
+
 		/* Copy data to N_PDU */
-		(void)memcpy(n_pdu->n_data, &can_data[2], can_dl - 2u);
+		(void)memcpy(n_pdu->n_data, &can_data[2], n_pdu->len_n_data);
 	}
 }
 
@@ -333,18 +303,26 @@ void _iso_tp_decode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 		_iso_tp_deduce_n_pcitype_n_ff(self, f);
 
 	/* ISO_TP_N_PCITYPE_CF */
-	} else if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x20u)) {
-		/* It's a consecutive frame! */
+	} else if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x20u) &&
+	           (self->cf_left > 1u)) {
+
 		n_pci->n_pcitype = ISO_TP_N_PCITYPE_CF;
 		n_pdu->n_pci.sn  = (can_data[0] & 0x0Fu);
 
+		n_pdu->len_n_data = (self->cf_left > 7u) ? 7u : self->cf_left;
+
+		self->cf_left = (self->cf_left >= 7u) ?
+				(self->cf_left - 7u) : 0u;
+
 		/* Copy data to N_PDU */
-		(void)memcpy(n_pdu->n_data, &can_data[1], can_dl - 1u);
+		(void)memcpy(n_pdu->n_data, &can_data[1],
+			     n_pdu->len_n_data);
 
 	/* ISO_TP_N_PCITYPE_FC */
 	} else if ((can_dl >= 3u) && ((can_data[0] & 0xF0u) == 0x30u)) {
 		/* Simplest case, we don't assume a shit */
-		n_pci->n_pcitype = ISO_TP_N_PCITYPE_FC;
+		n_pdu->len_n_data = 0u;
+		n_pci->n_pcitype  = ISO_TP_N_PCITYPE_FC;
 		n_pci->fs         = (can_data[0] & 0x0Fu);
 		n_pci->bs         = can_data[1];
 		n_pci->min_st     = can_data[2];
@@ -430,6 +408,88 @@ void _iso_tp_encode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 	}
 }
 
+/** Gets current configuration. Call this method to get initial config. */
+void iso_tp_get_config(struct iso_tp *self, struct iso_tp_config *cfg)
+{
+	*cfg = self->_cfg;
+}
+
+/** Configures main instance. Call this method after init. */
+void iso_tp_set_config(struct iso_tp *self, struct iso_tp_config *cfg)
+{
+	/* Only set config in this specific state */
+	if (self->_state == (uint8_t)_ISO_TP_STATE_CONFIG) {
+		self->_cfg = *cfg;
+	}
+}
+
+/** Push RX CAN frame for processing, returns false if busy. */
+bool iso_tp_push_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
+{
+	bool result = false;
+
+	if ((self->_state == (uint8_t)_ISO_TP_STATE_LISTEN_N_PDU) &&
+	    !self->_has_rx) {
+		self->_has_rx = true;
+
+		self->_can_rx_frame = *f;
+
+		result = true;
+	}
+
+	return result;
+}
+
+/** Pop TX CAN frame, returns false if busy.
+ * TODO not yet implemented */
+bool iso_tp_pop_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
+{
+	bool result = false;
+
+	if (self->_has_tx) {
+		self->_has_tx = false;
+
+		*f = self->_can_tx_frame;
+
+		result = true;
+	}
+
+	return result;
+}
+
+/** Get N_PDU if one is detected. Returns false if no valid N_PDU */
+bool iso_tp_get_n_pdu(struct iso_tp *self, struct iso_tp_n_pdu *pdu)
+{
+	bool result = false;
+
+	if (self->_n_pdu.n_pci.n_pcitype !=
+	    (uint8_t)ISO_TP_N_PCITYPE_INVALID) {
+		*pdu = self->_n_pdu;
+
+		result = true;
+	}
+
+	return result;
+}
+
+/** Override N_PDU. Will override internal N_PDU frame and will put TX frame
+ *  into frame queue. That's how the filtering is done!
+ *  Will return false if TX queue is full */
+bool iso_tp_override_n_pdu(struct iso_tp *self, struct iso_tp_n_pdu *pdu)
+{
+	bool result = false;
+
+	if (!self->_has_tx) {
+		self->_n_pdu = *pdu;
+		_iso_tp_encode_n_pdu(self, &self->_can_tx_frame);
+
+		self->_has_tx = true;
+		result = true;
+	}
+
+	return result;
+}
+
 /** Main instance state machine. Works step by step. Returns events during
  *  operation. Must be run inside main loop. */
 enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
@@ -471,6 +531,9 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 		}
 
 		_iso_tp_decode_n_pdu(self, &self->_can_rx_frame);
+
+		/* We've already decoded rx frame, wait for the next frame. */
+		self->_has_rx = false;
 
 		if (n_pci->n_pcitype == (uint8_t)ISO_TP_N_PCITYPE_INVALID) {
 			/* Ignore frame */
