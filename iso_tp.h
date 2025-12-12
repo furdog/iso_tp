@@ -372,13 +372,13 @@ void _iso_tp_encode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 		break;
 
 	case ISO_TP_N_PCITYPE_CF: {
-		uint8_t cf_payload_len = n_pci->sf_dl;
+		uint8_t cf_payload_len = n_pdu->len_n_data;
 
 		/* CF PCI: 0010 SSSS */
 		can_data[0] = (uint8_t)(0x20u | (n_pci->sn & 0x0Fu));
 
 		/* Safety cap */
-		if (cf_payload_len > 7u) {
+		if (n_pdu->len_n_data > 7u) {
 			cf_payload_len = 7u;
 		}
 
@@ -449,7 +449,9 @@ bool iso_tp_pop_frame(struct iso_tp *self, struct iso_tp_can_frame *f)
 	if (self->_has_tx) {
 		self->_has_tx = false;
 
-		*f = self->_can_tx_frame;
+		if (f != NULL) {
+			*f = self->_can_tx_frame;
+		}
 
 		result = true;
 	}
@@ -481,6 +483,10 @@ bool iso_tp_override_n_pdu(struct iso_tp *self, struct iso_tp_n_pdu *pdu)
 
 	if (!self->_has_tx) {
 		self->_n_pdu = *pdu;
+
+		/* Set TX ID same as RX, since we override frame */
+		self->_can_tx_frame.id = self->_can_rx_frame.id;
+
 		_iso_tp_encode_n_pdu(self, &self->_can_tx_frame);
 
 		self->_has_tx = true;

@@ -58,6 +58,19 @@ void iso_tp_print_n_pdu(struct iso_tp *self)
 	printf("-- N_PDU END   --\n\n\n\n");
 }
 
+void iso_tp_print_can_frame(struct iso_tp_can_frame *f)
+{
+	uint8_t i;
+			
+	printf("%08X %u:", f->id, f->len);
+	       
+	for (i = 0; i < f->len; i++) {
+		printf("%02X ", f->data[i]);
+	}
+
+	printf("\n");
+}
+
 /******************************************************************************
  * TESTS
  *****************************************************************************/
@@ -82,8 +95,8 @@ void iso_tp_test_init(struct iso_tp *self)
 	assert(iso_tp_step(self, 0u) == ISO_TP_EVENT_NONE);
 }
 
-/* Test single frame simplest case */
-void iso_tp_test_simple_sf(struct iso_tp *self)
+/** Test example log for valid N_PDU (all should be valid) */
+void iso_tp_test_example_log(struct iso_tp *self)
 {
 	size_t i;
 
@@ -103,12 +116,73 @@ void iso_tp_test_simple_sf(struct iso_tp *self)
 	}
 }
 
+/** Test override in real time! */
+void iso_tp_test_override(struct iso_tp *self)
+{
+	size_t i;
+
+	/* Prepare stuff to observe */
+	struct iso_tp_n_pdu n_pdu;
+	uint32_t obd_id  = 0x0000079Bu;
+	uint32_t lbc_id  = 0x000007BBu;
+	uint32_t full_sn = 0u;
+
+	for (i = 0; i < sizeof(example_log) / sizeof(struct example_can_frame);
+	     i++) {
+		struct iso_tp_can_frame f;
+
+		/* Copy example frame from log*/
+		f.id   = example_log[i].id;
+		f.len  = example_log[i].dlc;
+		memcpy(&f.data, example_log[i].data, f.len);
+
+		/* Push frame into iso_tp state machine */
+		iso_tp_push_frame(self, &f);
+		assert(iso_tp_step(self, 0u) == ISO_TP_EVENT_N_PDU);
+
+		/* Observe desired data to override */
+		if (iso_tp_get_n_pdu(self, &n_pdu) && (f.id == obd_id) &&
+		    (n_pdu.n_pci.n_pcitype == ISO_TP_N_PCITYPE_SF) &&
+		    (n_pdu.n_pci.sf_dl == 2u) && (n_pdu.len_n_data == 2u) &&
+		    (n_pdu.n_data[0] == 0x21u && n_pdu.n_data[1] == 0x01u)) {
+			full_sn = 0u;
+		}
+
+		if ((f.id == lbc_id) &&
+		    (n_pdu.n_pci.n_pcitype == ISO_TP_N_PCITYPE_CF) &&
+		    (n_pdu.len_n_data == 7u)) {
+			full_sn++;
+		}
+
+		if (full_sn == 3u) {
+			n_pdu.n_data[2] = 0x12;
+			n_pdu.n_data[3] = 0x34;
+			n_pdu.n_data[4] = 0x56;
+
+			/* Print CAN frame before override */
+			iso_tp_print_can_frame(&f);
+
+			iso_tp_override_n_pdu(self, &n_pdu);
+			iso_tp_pop_frame(self, &f);
+
+			/* Print CAN frame after override */
+			printf("\x1B[32m");
+			iso_tp_print_can_frame(&f);
+			printf("\x1B[0m");
+		}
+
+		/* Print N_PDU frame */
+		iso_tp_print_n_pdu(self);
+	}
+}
+
 int main ()
 {
 	struct iso_tp tp;
 
 	iso_tp_test_init(&tp);
-	iso_tp_test_simple_sf(&tp);
+	/* iso_tp_test_example_log(&tp); */
+	iso_tp_test_override(&tp);
 
 	return 0;
 }
