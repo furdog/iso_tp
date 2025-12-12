@@ -93,7 +93,6 @@ enum iso_tp_n_tatype {
 /** N_PCI (Network Protocol Control Information Type).
  *  In simple terms it just identifies CAN frame type */
 enum iso_tp_n_pcitype {
-	ISO_TP_N_PCITYPE_UNKNOWN, /**< Type not known @note Not standard */
 	ISO_TP_N_PCITYPE_INVALID, /**< Type not valid @note Not standard */
 
 	ISO_TP_N_PCITYPE_SF, /**< SingleFrame      (SF) */
@@ -153,35 +152,9 @@ enum _iso_tp_state
 	_ISO_TP_STATE_LISTEN_N_PDU  /**< Listen for first N_PDU message */
 };
 
-/** Working modes. Only bridge mode is supported yet. @note Not standard */
-enum iso_tp_mode {
-	ISO_TP_MODE_INVALID,
-
-	/** Bridge means that no communication is initiated by ISO-TP,
-	  * but instead it works like a bridge or filter: src -> bridge -> dst
-	  * Can be used in applications that require message filtering. */
-	ISO_TP_MODE_BRIDGE
-};
-
-/** Structure to configure main instance.
- *  src and dst are used for connection between two endpoints.
- *  The correct order of src and dst does not matter for P2P endpoints,
- *  but it's recomended to set src for master and dst for slave devices
- *  outside of P2P applications.
- *  @attention P2P communication is not yet implemented. Though ISO-TP is
- *  originally a P2P protocol. Currently it's `src` centered, which is suitable
- *  for master/slave applications like diagnostic through OBD II
- *  @note Not standard (except members)
- */
+/** Structure to configure main instance (after initialization) */
 struct iso_tp_config {
-	uint8_t mode; /**< Configure operation mode. @note Not standard */
-
-	uint8_t n_tatype; /**< Network target address type */
-
-	uint32_t src; /**< Configure source      endpoint address
-			@note Not standard */
-	uint32_t dst; /**< Configure destination endpoint address
-			@note Not standard */
+	uint8_t n_tatype; /**< Network target address type. TODO use this*/
 
 	uint8_t tx_dl; /**< Max DLC for TX limited by ISO_TP_MAX_CAN_DL */
 	uint8_t rx_dl; /**< Max DLC for TX limited by ISO_TP_MAX_CAN_DL.
@@ -215,13 +188,10 @@ void iso_tp_init(struct iso_tp *self)
 
 	(void)memset(&self->_n_pdu, 0u, sizeof(struct iso_tp_n_pdu));
 
-	self->_cfg.mode      = ISO_TP_MODE_INVALID;
 	self->_cfg.n_tatype  = ISO_TP_N_TATYPE_1; /* Used the most */
-	self->_cfg.src       = 0x00u;
-	self->_cfg.dst       = 0x00u;
-	self->_cfg.tx_dl     = 8u; /* Assume CAN2.0 by default */
-	self->_cfg.rx_dl     = 8u; /* Assume CAN2.0 by default */
-	self->_cfg.min_ff_dl = 8u; /* Assume CAN2.0 by default */
+	self->_cfg.tx_dl     = 0u;
+	self->_cfg.rx_dl     = 0u; /* Assume CAN2.0 by default */
+	self->_cfg.min_ff_dl = 0u; /* Assume CAN2.0 by default */
 
 	self->_has_tx = false;
 	self->_has_rx = false;
@@ -476,8 +446,7 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 	switch (self->_state) {
 	case _ISO_TP_STATE_CONFIG:
 		/* Mode and MTU must be set correctly */
-		if ((self->_cfg.mode == (uint8_t)ISO_TP_MODE_INVALID) ||
-		    (self->_cfg.tx_dl < 8u)) {
+		if (self->_cfg.tx_dl < 8u) {
 			ev = ISO_TP_EVENT_INVALID_CONFIG;
 			break;
 		}
@@ -498,16 +467,6 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 
 	case _ISO_TP_STATE_LISTEN_N_PDU: {
 		if (!self->_has_rx) {
-			break;
-		}
-
-		/* Only listen for src messages YET */
-		if (self->_can_rx_frame.id != self->_cfg.src) {
-			break;
-		}
-
-		/* Validate frame src address */
-		if (self->_can_rx_frame.id != self->_cfg.src) {
 			break;
 		}
 
