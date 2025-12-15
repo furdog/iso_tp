@@ -553,6 +553,9 @@ enum iso_tp_event iso_tp_step(struct iso_tp *self, uint32_t delta_time_ms)
 		break;
 
 	case _ISO_TP_STATE_LISTEN_N_PDU: {
+		/* Invalidate N_PDU before all */
+		n_pci->n_pcitype = ISO_TP_N_PCITYPE_INVALID;
+
 		if (!self->_has_rx) {
 			break;
 		}
