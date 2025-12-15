@@ -140,6 +140,11 @@ void iso_tp_test_override(struct iso_tp *self)
 		iso_tp_push_frame(self, &f);
 		assert(iso_tp_step(self, 0u) == ISO_TP_EVENT_N_PDU);
 
+		/* Drop sn on error */
+		if (iso_tp_has_cf_err(self)) {
+			full_sn = 0u;
+		}
+
 		/* Observe desired data to override */
 		if (iso_tp_get_n_pdu(self, &n_pdu) && (f.id == obd_id) &&
 		    (n_pdu.n_pci.n_pcitype == ISO_TP_N_PCITYPE_SF) &&
@@ -148,13 +153,21 @@ void iso_tp_test_override(struct iso_tp *self)
 			full_sn = 0u;
 		}
 
+		/* Observe first frame */
 		if ((f.id == lbc_id) &&
+		    (n_pdu.n_pci.n_pcitype == ISO_TP_N_PCITYPE_FF) &&
+		    (n_pdu.len_n_data == 6u)) {
+			full_sn = 1u;
+		}
+
+
+		if (!iso_tp_has_cf_err(self) && (f.id == lbc_id) &&
 		    (n_pdu.n_pci.n_pcitype == ISO_TP_N_PCITYPE_CF) &&
 		    (n_pdu.len_n_data == 7u)) {
 			full_sn++;
 		}
 
-		if (full_sn == 3u) {
+		if (!iso_tp_has_cf_err(self) && full_sn == 3u) {
 			n_pdu.n_data[2] = 0x12;
 			n_pdu.n_data[3] = 0x34;
 			n_pdu.n_data[4] = 0x56;
@@ -172,6 +185,8 @@ void iso_tp_test_override(struct iso_tp *self)
 		}
 
 		/* Print N_PDU frame */
+		printf("cf_err: %s\n", iso_tp_has_cf_err(self) ?
+					"true" : "false");
 		iso_tp_print_n_pdu(self);
 	}
 }

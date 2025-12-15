@@ -180,8 +180,10 @@ struct iso_tp {
 	struct iso_tp_can_frame _can_tx_frame; /**< Frame to transmit */
 	struct iso_tp_can_frame _can_rx_frame; /**< Received frame */
 
-	uint8_t cf_left; /**< Data left to read for consecutive frame
+	uint8_t _cf_left; /**< Data left to read for consecutive frame
 			      @note Not standard */
+
+	bool _cf_err; /**< CF is not safe for work @note Not standard */ 
 };
 
 /** Init main instance */
@@ -199,7 +201,8 @@ void iso_tp_init(struct iso_tp *self)
 	self->_has_tx = false;
 	self->_has_rx = false;
 
-	self->cf_left = 0u;
+	self->_cf_left = 0u;
+	self->_cf_err  = false;
 
 	/*self->_src_sv_frame = ??;*/
 	/*self->_dst_sv_frame = ??;*/
@@ -258,6 +261,8 @@ void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 	 * TODO implement correct RX_DL mapping */
 	self->_cfg.rx_dl = can_dl;
 
+	self->_cf_err = true;
+
 	if (can_dl < 2u) {
 		/* CAN DLC can't be less than len(N_PCI) */
 	} else if (n_pci->ff_dl == 0u) {
@@ -274,10 +279,15 @@ void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 		n_pdu->len_n_data = can_dl - 2u;
 
 		/* Set cf_left to know how many bytes left for CF to read */
-		self->cf_left = n_pci->ff_dl - n_pdu->len_n_data;
+		self->_cf_left = n_pci->ff_dl - n_pdu->len_n_data;
+
+		/* Set initial sequence num */
+		n_pdu->n_pci.sn = 0u;
 
 		/* Copy data to N_PDU */
 		(void)memcpy(n_pdu->n_data, &can_data[2], n_pdu->len_n_data);
+
+		self->_cf_err = false;
 	}
 }
 
@@ -304,15 +314,21 @@ void _iso_tp_decode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 
 	/* ISO_TP_N_PCITYPE_CF */
 	} else if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x20u) &&
-	           (self->cf_left > 1u)) {
+	           (self->_cf_left > 1u)) {
+		uint8_t sn = (can_data[0] & 0x0Fu);
 
 		n_pci->n_pcitype = ISO_TP_N_PCITYPE_CF;
-		n_pdu->n_pci.sn  = (can_data[0] & 0x0Fu);
 
-		n_pdu->len_n_data = (self->cf_left > 7u) ? 7u : self->cf_left;
+		if (((sn - 1u) & 0x0Fu) != n_pdu->n_pci.sn) {
+			self->_cf_err = true;
+		}
 
-		self->cf_left = (self->cf_left >= 7u) ?
-				(self->cf_left - 7u) : 0u;
+		n_pdu->n_pci.sn = sn;
+		n_pdu->len_n_data = (self->_cf_left > 7u) ?
+				     7u : self->_cf_left;
+
+		self->_cf_left = (self->_cf_left >= 7u) ?
+				 (self->_cf_left - 7u) : 0u;
 
 		/* Copy data to N_PDU */
 		(void)memcpy(n_pdu->n_data, &can_data[1],
@@ -395,10 +411,10 @@ void _iso_tp_encode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 		can_data[1] = n_pci->bs;
 		can_data[2] = n_pci->min_st;
 
-		*can_dl = 3u; /* Minimum len FC */
+		/* *can_dl = 3u ; */ /* Minimum len FC */
 
 		/* Padding (optional): 8 bytes 0x00 or 0xAA */
-		/* f->len = 8u; */
+		f->len = 8u;
 		break;
 
 	default:
@@ -472,6 +488,11 @@ bool iso_tp_get_n_pdu(struct iso_tp *self, struct iso_tp_n_pdu *pdu)
 	}
 
 	return result;
+}
+
+bool iso_tp_has_cf_err(struct iso_tp *self)
+{
+	return self->_cf_err;
 }
 
 /** Override N_PDU. Will override internal N_PDU frame and will put TX frame
