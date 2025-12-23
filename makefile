@@ -48,6 +48,13 @@ test: $(SOURCE_FILES)
 	  -o $(TEST_OUTPUT)
 	# Run the compiled test executable
 	./$(TEST_OUTPUT)
+
+	# Create new output and diff with correct one
+	# Correct output should be created manually
+	@mkdir -p output
+	./$(TEST_OUTPUT) > output/new.txt
+	diff output/correct.txt output/new.txt --color
+
 	# Clean up the test executable
 	@rm -f $(TEST_OUTPUT)
 

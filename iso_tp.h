@@ -127,6 +127,7 @@ struct iso_tp_n_pdu
 {
 	struct iso_tp_n_pci n_pci; /**< N_PCI info */
 
+	/* TODO replace with reference to CAN message to reduce copying */
 	uint8_t	n_data[ISO_TP_MAX_CAN_DL]; /**< Payload */
 	uint8_t	len_n_data; /**< n_data length @note Not standard */
 };
