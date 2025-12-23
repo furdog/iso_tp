@@ -93,12 +93,12 @@ enum iso_tp_n_tatype {
 /** N_PCI (Network Protocol Control Information Type).
  *  In simple terms it just identifies CAN frame type */
 enum iso_tp_n_pcitype {
-	ISO_TP_N_PCITYPE_INVALID, /**< Type not valid @note Not standard */
-
 	ISO_TP_N_PCITYPE_SF, /**< SingleFrame      (SF) */
 	ISO_TP_N_PCITYPE_FF, /**< FirstFrame       (FF) */
 	ISO_TP_N_PCITYPE_CF, /**< ConsecutiveFrame (CF) */
-	ISO_TP_N_PCITYPE_FC  /**< FlowControl      (FC) */
+	ISO_TP_N_PCITYPE_FC, /**< FlowControl      (FC) */
+
+	ISO_TP_N_PCITYPE_INVALID /**< Type not valid @note Not standard */
 };
 
 /** N_PCI (Network Protocol Control Information).
@@ -211,8 +211,7 @@ void iso_tp_init(struct iso_tp *self)
 
 /** Deduce variation of ISO_TP_N_PCITYPE_SF.
  *  Currently only Normal addressing is used TODO */
-void _iso_tp_deduce_n_pcitype_n_sf(struct iso_tp *self,
-				   struct iso_tp_can_frame *f)
+void _iso_tp_decode_sf(struct iso_tp *self, struct iso_tp_can_frame *f)
 {
 	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
 	struct iso_tp_n_pci *n_pci    = &self->_n_pdu.n_pci;
@@ -246,10 +245,8 @@ void _iso_tp_deduce_n_pcitype_n_sf(struct iso_tp *self,
 
 /** Deduce variation of ISO_TP_N_PCITYPE_FF.
  *  Currently only Normal addressing is used TODO */
-void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
-				   struct iso_tp_can_frame *f)
+void _iso_tp_decode_ff(struct iso_tp *self, struct iso_tp_can_frame *f)
 {
-	/* Commonly used */
 	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
 	struct iso_tp_n_pci *n_pci    = &self->_n_pdu.n_pci;
 	uint8_t		     can_dl   = f->len;
@@ -292,58 +289,93 @@ void _iso_tp_deduce_n_pcitype_n_ff(struct iso_tp *self,
 	}
 }
 
+/** Decode ISO_TP_N_PCITYPE_CF.
+ *  Currently only Normal addressing is used TODO */
+void _iso_tp_decode_cf(struct iso_tp *self, struct iso_tp_can_frame *f)
+{
+	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
+	struct iso_tp_n_pci *n_pci    = &self->_n_pdu.n_pci;
+	uint8_t		    *can_data = f->data;
+
+	uint8_t sn = (can_data[0] & 0x0Fu);
+
+	n_pci->n_pcitype = ISO_TP_N_PCITYPE_CF;
+
+	if (((sn - 1u) & 0x0Fu) != n_pdu->n_pci.sn) {
+		self->_cf_err = true;
+	}
+
+	n_pdu->n_pci.sn = sn;
+	n_pdu->len_n_data = (self->_cf_left > 7u) ?
+			     7u : self->_cf_left;
+
+	self->_cf_left = (self->_cf_left >= 7u) ?
+			 (self->_cf_left - 7u) : 0u;
+
+	/* Copy data to N_PDU */
+	(void)memcpy(n_pdu->n_data, &can_data[1],
+		     n_pdu->len_n_data);
+}
+
+/** Decode ISO_TP_N_PCITYPE_FC
+ *  Currently only Normal addressing is used TODO */
+void _iso_tp_decode_fc(struct iso_tp *self, struct iso_tp_can_frame *f)
+{
+	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
+	struct iso_tp_n_pci *n_pci    = &self->_n_pdu.n_pci;
+	uint8_t		    *can_data = f->data;
+
+	/* Simplest case, we don't assume a shit */
+	n_pdu->len_n_data = 0u;
+	n_pci->n_pcitype  = ISO_TP_N_PCITYPE_FC;
+	n_pci->fs         = (can_data[0] & 0x0Fu);
+	n_pci->bs         = can_data[1];
+	n_pci->min_st     = can_data[2];
+}
+
 /** Decode N_PDU and N_PCItype based on frame contents.
  * Based on: ISO 15765-2:2016(E) Table 9 — Summary of N_PCI bytes.
  * Currently only Normal addressing is used TODO */
 void _iso_tp_decode_n_pdu(struct iso_tp *self, struct iso_tp_can_frame *f)
 {
-	/* Commonly used */
-	struct iso_tp_n_pdu *n_pdu    = &self->_n_pdu;
 	struct iso_tp_n_pci *n_pci    = &self->_n_pdu.n_pci;
 	uint8_t		     can_dl   = f->len;
 	uint8_t		    *can_data = f->data;
 
 	n_pci->n_pcitype = ISO_TP_N_PCITYPE_INVALID;
 
-	/* ISO_TP_N_PCITYPE_SF */
-	if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x00u)) {
-		_iso_tp_deduce_n_pcitype_n_sf(self, f);
-
-	/* ISO_TP_N_PCITYPE_FF */
-	} else if ((can_dl >= 2u) && ((can_data[0] & 0xF0u) == 0x10u)) {
-		_iso_tp_deduce_n_pcitype_n_ff(self, f);
-
-	/* ISO_TP_N_PCITYPE_CF */
-	} else if ((can_dl >= 1u) && ((can_data[0] & 0xF0u) == 0x20u) &&
-	           (self->_cf_left > 1u)) {
-		uint8_t sn = (can_data[0] & 0x0Fu);
-
-		n_pci->n_pcitype = ISO_TP_N_PCITYPE_CF;
-
-		if (((sn - 1u) & 0x0Fu) != n_pdu->n_pci.sn) {
-			self->_cf_err = true;
+	switch ((can_data[0] & 0xF0u) >> 4u) {
+	case ISO_TP_N_PCITYPE_SF:
+		if (can_dl >= 1u) {
+			_iso_tp_decode_sf(self, f);
 		}
 
-		n_pdu->n_pci.sn = sn;
-		n_pdu->len_n_data = (self->_cf_left > 7u) ?
-				     7u : self->_cf_left;
+		break;
 
-		self->_cf_left = (self->_cf_left >= 7u) ?
-				 (self->_cf_left - 7u) : 0u;
+	case ISO_TP_N_PCITYPE_FF:
+		if (can_dl >= 2u) {
+			_iso_tp_decode_ff(self, f);
+		}
 
-		/* Copy data to N_PDU */
-		(void)memcpy(n_pdu->n_data, &can_data[1],
-			     n_pdu->len_n_data);
+		break;
 
-	/* ISO_TP_N_PCITYPE_FC */
-	} else if ((can_dl >= 3u) && ((can_data[0] & 0xF0u) == 0x30u)) {
-		/* Simplest case, we don't assume a shit */
-		n_pdu->len_n_data = 0u;
-		n_pci->n_pcitype  = ISO_TP_N_PCITYPE_FC;
-		n_pci->fs         = (can_data[0] & 0x0Fu);
-		n_pci->bs         = can_data[1];
-		n_pci->min_st     = can_data[2];
-	} else {}
+	case ISO_TP_N_PCITYPE_CF:
+		if ((can_dl >= 2u) && (self->_cf_left > 1u)) {
+			_iso_tp_decode_cf(self, f);
+		}
+
+		break;
+
+	case ISO_TP_N_PCITYPE_FC:
+		if (can_dl >= 3u) {
+			_iso_tp_decode_fc(self, f);
+		}
+
+		break;
+
+	default:
+		break;
+	}
 }
 
 /** Encode N_PDU and put its content into CAN frame.

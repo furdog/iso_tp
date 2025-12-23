@@ -16,11 +16,11 @@ void iso_tp_print_n_pdu(struct iso_tp *self)
 	uint8_t i;
 
 	const char *n_pcitype_str[] = {
-		"ISO_TP_N_PCITYPE_INVALID",
 		"ISO_TP_N_PCITYPE_SF",
 		"ISO_TP_N_PCITYPE_FF",
 		"ISO_TP_N_PCITYPE_CF",
 		"ISO_TP_N_PCITYPE_FC",
+		"ISO_TP_N_PCITYPE_INVALID"
 	};
 
 	printf("-- N_PDU BEGIN --\n");
